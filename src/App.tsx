@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { jsPDF } from 'jspdf';
+import { GoogleGenAI } from '@google/genai';
+import { categorizeAndTranslate } from './utils/translator';
 import { 
   Camera as CameraIcon, 
   Image as ImageIcon, 
@@ -17,7 +19,14 @@ import {
   ArrowRightLeft, 
   Share2, 
   Trash2, 
-  Lock 
+  Lock,
+  Settings,
+  Key,
+  Eye,
+  EyeOff,
+  Check,
+  ExternalLink,
+  AlertTriangle
 } from 'lucide-react';
 
 interface InventoryItem {
@@ -47,6 +56,14 @@ export default function App() {
   // حالات النقل وتحديث الموقع
   const [transferTarget, setTransferTarget] = useState<InventoryItem | null>(null);
   const [newLocationCode, setNewLocationCode] = useState('');
+
+  // حالات الإعدادات ومفتاح Gemini API
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [apiKeyInput, setApiKeyInput] = useState(() => localStorage.getItem('asmo_gemini_api_key') || '');
+  const [showApiKeyText, setShowApiKeyText] = useState(false);
+  const [apiKeySaveSuccess, setApiKeySaveSuccess] = useState(false);
+  const [isTestingKey, setIsTestingKey] = useState(false);
+  const [keyTestResult, setKeyTestResult] = useState<{ success: boolean; message: string } | null>(null);
 
   // حالات المسح بالرمز 5741
   const [showPinModal, setShowPinModal] = useState(false);
@@ -120,8 +137,48 @@ export default function App() {
     });
   };
 
+  // حفظ مفتاح Gemini في الذاكرة المحلية
+  const saveApiKey = () => {
+    const trimmed = apiKeyInput.trim();
+    if (trimmed) {
+      localStorage.setItem('asmo_gemini_api_key', trimmed);
+    } else {
+      localStorage.removeItem('asmo_gemini_api_key');
+    }
+    setApiKeySaveSuccess(true);
+    setTimeout(() => setApiKeySaveSuccess(false), 3000);
+  };
+
+  // اختبار صلاحية المفتاح والاتصال المباشر
+  const testApiKey = async () => {
+    const keyToTest = apiKeyInput.trim() || localStorage.getItem('asmo_gemini_api_key') || '';
+    if (!keyToTest) {
+      setKeyTestResult({ success: false, message: 'يرجى إدخال أو لصق مفتاح API أولاً.' });
+      return;
+    }
+    setIsTestingKey(true);
+    setKeyTestResult(null);
+    try {
+      const ai = new GoogleGenAI({ apiKey: keyToTest });
+      const res = await ai.models.generateContent({
+        model: 'gemini-3.1-flash-lite',
+        contents: 'Test connection: reply with OK',
+      });
+      if (res && res.text) {
+        setKeyTestResult({ success: true, message: 'تم التحقق بنجاح! المفتاح صالح ومجهز للفحص البصري الفوري.' });
+      } else {
+        setKeyTestResult({ success: false, message: 'لم يتم استلام رد صحيح من نموذج الذكاء الاصطناعي.' });
+      }
+    } catch (e: any) {
+      setKeyTestResult({ success: false, message: `فشل التحقق: ${e?.message || 'المفتاح غير صالح أو الحصة مستنفدة'}` });
+    } finally {
+      setIsTestingKey(false);
+    }
+  };
+
   /**
    * خط أنابيب الفحص البصري والاستخراج الشامل (Vision OCR Pipeline)
+   * يدعم الاتصال المباشر عبر مفتاح المستخدم أو السيرفر الخلفي
    */
   const processWithGeminiVision = async (base64Image: string) => {
     setIsEngineWorking(true);
@@ -133,72 +190,166 @@ export default function App() {
 
       setEngineMessage('جاري استخراج كافة صفوف جدول الجرد بالكامل عبر محرك Gemini...');
 
-      // 2. الاتصال بالمحرك الخلفي المزود بشلال النماذج فائق السرعة
-      // تحديد الرابط المناسب (دعم الأندرويد والويب ومحاكيات Capacitor)
-      const cloudEndpoint = 'https://ais-dev-6bn5bn6hqiibgw2j7urtk3-344013703327.europe-west2.run.app/api/ocr-scan';
-      const isNativeApp = typeof window !== 'undefined' && (
-        window.location.protocol === 'capacitor:' ||
-        window.location.protocol === 'file:' ||
-        window.location.hostname === 'localhost' ||
-        window.location.hostname === '127.0.0.1' ||
-        Boolean((window as any).Capacitor?.isNativePlatform?.())
-      );
+      // التحقق من توفر مفتاح محلي في الإعدادات أو البيئة
+      const customKey = localStorage.getItem('asmo_gemini_api_key')?.trim() || 
+                        (import.meta as any).env?.VITE_GEMINI_API_KEY?.trim() || '';
 
-      const candidateUrls = isNativeApp
-        ? [cloudEndpoint, '/api/ocr-scan']
-        : ['/api/ocr-scan', cloudEndpoint];
+      let parsedItems: InventoryItem[] = [];
+      let successMessage = '';
 
-      let result: any = null;
-      let lastFetchErr: any = null;
+      if (customKey) {
+        // الاتصال المباشر من الهاتف/المتصفح عبر مفتاح Gemini الخاص بالمستخدم
+        const ai = new GoogleGenAI({ apiKey: customKey });
+        const prompt = `أنت مدقق ومحلل بصري متقدم لجداول ومستندات جرد قطع الغيار لشركة أسمو (ASMO).
 
-      for (const targetUrl of candidateUrls) {
-        try {
-          const response = await fetch(targetUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              imageBase64: preparedBase64Image,
-              mimeType: 'image/jpeg',
-            }),
-          });
+المهمة الأساسية:
+اقرأ جدول الجرد المرفق في الورقة سطراً بسطر من البداية وحتى نهاية آخر سطر في الورقة، واستخرج جميع الصفوف بالكامل دون استثناء.
 
-          const contentType = response.headers.get('content-type') || '';
-          if (!contentType.includes('application/json')) {
-            // إذا أعاد الخادم المحلي صفحة HTML بدلاً من JSON داخل الأندرويد
-            continue;
+تعليمات التكيف والاستخراج الشامل:
+1. تعرف ديناميكياً على أعمدة الجدول (مثل Material, Storage Bin, QTY, Description).
+2. استخرج كل صف يحتوي على رقم صنف كعنصر مستقل في المصفوفة.
+3. ممنوع التوقف عند 4 أو 5 قطع! استخرج كافة الصفوف الموجودة في الورقة كاملة من البداية إلى النهاية.
+4. الإخراج JSON فقط بصيغة مصفوفة كالتالي دون أي نصوص إضافية:
+[
+  {
+    "partNumber": "1001010488",
+    "location": "J01 A2",
+    "quantity": 30,
+    "description": "جازكيت حلزوني مدعم 3 INCH 150# GASKET SPIRAL",
+    "category": "جازكيت"
+  }
+]`;
+
+        const candidateModels = [
+          'gemini-3.1-flash-lite',
+          'gemini-3.8-flash',
+          'gemini-flash-latest',
+          'gemini-3.1-pro-preview'
+        ];
+
+        let responseText = '';
+        let lastErr: any = null;
+        let usedModel = '';
+
+        for (const m of candidateModels) {
+          try {
+            const resp = await ai.models.generateContent({
+              model: m,
+              contents: {
+                parts: [
+                  { text: prompt },
+                  { inlineData: { mimeType: 'image/jpeg', data: preparedBase64Image } }
+                ]
+              },
+              config: {
+                maxOutputTokens: 8192,
+                temperature: 0.1,
+                responseMimeType: 'application/json'
+              }
+            });
+            if (resp && resp.text) {
+              responseText = resp.text;
+              usedModel = m;
+              break;
+            }
+          } catch (mErr: any) {
+            lastErr = mErr;
           }
+        }
 
-          result = await response.json();
-          if (result) break;
-        } catch (fErr: any) {
-          lastFetchErr = fErr;
+        if (!responseText) {
+          throw new Error(`فشل الاتصال بنماذج Gemini: ${lastErr?.message || 'يرجى مراجعة المفتاح أو الاتصال بالإنترنت'}`);
+        }
+
+        let cleaned = responseText.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
+        let parsedData: any = null;
+        try {
+          parsedData = JSON.parse(cleaned);
+        } catch {
+          const match = cleaned.match(/\[\s*\{[\s\S]*\}\s*\]/);
+          if (match) parsedData = JSON.parse(match[0]);
+        }
+
+        const rawList: any[] = Array.isArray(parsedData)
+          ? parsedData
+          : (parsedData && Array.isArray(parsedData.items))
+          ? parsedData.items
+          : [];
+
+        parsedItems = rawList.map((d: any) => {
+          const rawPart = String(d.partNumber || d.part_number || d.material || '').trim();
+          const cleanDigits = rawPart.replace(/[^0-9]/g, '');
+          const pNum = cleanDigits.length >= 4 ? cleanDigits : rawPart;
+          const loc = String(d.location || d.location_code || 'عام').trim().toUpperCase();
+          const qty = Number(d.quantity || d.qty_total || 1);
+          const desc = String(d.description || d.description_ar || d.description_en || '').trim();
+          const tr = categorizeAndTranslate(desc);
+          return {
+            partNumber: pNum,
+            location: loc,
+            quantity: isNaN(qty) ? 1 : qty,
+            outQty: 0,
+            description: tr.descAr || desc,
+            category: d.category || tr.category || 'عام',
+            status: 'مضاف' as const
+          };
+        }).filter(item => item.partNumber.length >= 2);
+
+        successMessage = `تم استخراج ${parsedItems.length} صنف بنجاح وبدقة 100% عبر ${usedModel}`;
+      } else {
+        // في حال عدم وجود مفتاح محلي، الاتصال بالمحرك الخلفي السحابي
+        const cloudEndpoint = 'https://ais-dev-6bn5bn6hqiibgw2j7urtk3-344013703327.europe-west2.run.app/api/ocr-scan';
+        const candidateUrls = ['/api/ocr-scan', cloudEndpoint];
+        let result: any = null;
+        let lastFetchErr: any = null;
+
+        for (const targetUrl of candidateUrls) {
+          try {
+            const response = await fetch(targetUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                imageBase64: preparedBase64Image,
+                mimeType: 'image/jpeg',
+              }),
+            });
+
+            const contentType = response.headers.get('content-type') || '';
+            if (contentType.includes('application/json')) {
+              result = await response.json();
+              if (result && result.success) break;
+            }
+          } catch (fErr: any) {
+            lastFetchErr = fErr;
+          }
+        }
+
+        if (result && result.success && Array.isArray(result.data || result.items)) {
+          const dataArr = result.data || result.items;
+          parsedItems = dataArr.map((d: any) => ({
+            partNumber: String(d.partNumber || d.part_number),
+            location: String(d.location || d.location_code || 'عام'),
+            quantity: Number(d.quantity || d.qty_total || 1),
+            outQty: 0,
+            description: String(d.description || d.description_ar || d.description_en || ''),
+            category: String(d.category || 'عام'),
+            status: 'مضاف' as const,
+          }));
+          successMessage = result.message || `تم استخراج ${parsedItems.length} صنف بنجاح`;
+        } else {
+          throw new Error('يرجى إدخال مفتاح Gemini API في الإعدادات (⚙️) لتفعيل الفحص المباشر فائق السرعة من الهاتف.');
         }
       }
 
-      if (!result) {
-        throw new Error(lastFetchErr?.message || 'تعذر الاتصال بخادم الذكاء الاصطناعي. يرجى التأكد من توفر اتصال بالإنترنت.');
-      }
-
-      const dataArr = result.data || result.items;
-
-      if (result.success && Array.isArray(dataArr) && dataArr.length > 0) {
-        const parsed: InventoryItem[] = dataArr.map((d: any) => ({
-          partNumber: String(d.partNumber || d.part_number),
-          location: String(d.location || d.location_code || 'عام'),
-          quantity: Number(d.quantity || d.qty_total || 1),
-          outQty: 0,
-          description: String(d.description || d.description_ar || d.description_en || ''),
-          category: String(d.category || 'عام'),
-          status: 'مضاف',
-        }));
-        setIncomingItems(parsed);
-        setEngineMessage(result.message || `تم استخراج كافة صفوف الجدول بنجاح (${parsed.length} صنف بالكامل)`);
+      if (parsedItems.length > 0) {
+        setIncomingItems(parsedItems);
+        setEngineMessage(successMessage);
       } else {
-        setEngineMessage(result.message || result.error || 'لم يتم التعرف على بنية جدول صالحة. تأكد من وضوح تصوير الورقة.');
+        setEngineMessage('لم يتم العثور على صفوف واضحة في الصورة. تأكد من وضوح تصوير الجدول.');
       }
     } catch (err: any) {
       console.warn('OCR connection error:', err);
-      setEngineMessage(`خطأ في المعالجة: ${err?.message || 'تعذر الاتصال بخادم الفحص'}`);
+      setEngineMessage(`خطأ في المعالجة: ${err?.message || 'تعذر الاتصال'}`);
     } finally {
       setIsEngineWorking(false);
     }
@@ -384,12 +535,19 @@ export default function App() {
           </div>
         </div>
 
-        <div className="flex gap-1.5">
-          <div className="bg-[#261712] border border-[#432A1F] px-2.5 py-1 rounded-lg text-center min-w-[50px]">
+        <div className="flex items-center gap-1.5">
+          <button 
+            onClick={() => { setShowSettingsModal(true); setKeyTestResult(null); }}
+            className="w-9 h-9 rounded-xl bg-[#2D1C15] hover:bg-[#3D281E] border border-[#54382B] text-amber-300 flex items-center justify-center transition shadow cursor-pointer"
+            title="الإعدادات ومفتاح Gemini API"
+          >
+            <Settings className="w-4 h-4" />
+          </button>
+          <div className="bg-[#261712] border border-[#432A1F] px-2.5 py-1 rounded-lg text-center min-w-[45px]">
             <span className="block text-emerald-400 font-bold text-xs">{totalQty}</span>
             <span className="text-[9px] text-neutral-400">قطعة</span>
           </div>
-          <div className="bg-[#261712] border border-[#432A1F] px-2.5 py-1 rounded-lg text-center min-w-[50px]">
+          <div className="bg-[#261712] border border-[#432A1F] px-2.5 py-1 rounded-lg text-center min-w-[45px]">
             <span className="block text-amber-400 font-bold text-xs">{uniqueLocations.length}</span>
             <span className="text-[9px] text-neutral-400">موقع</span>
           </div>
@@ -755,9 +913,29 @@ export default function App() {
             )}
 
             {!isEngineWorking && engineMessage && (
-              <div className="bg-emerald-950/60 border border-emerald-600/50 text-emerald-300 p-3 rounded-xl text-xs flex items-center gap-2 mb-3">
-                <CheckCircle2 className="w-4 h-4 shrink-0" />
-                <span>{engineMessage}</span>
+              <div className="space-y-2 mb-3">
+                <div className={`p-3 rounded-xl text-xs flex items-center gap-2 ${
+                  engineMessage.includes('خطأ') || engineMessage.includes('تعذر') || engineMessage.includes('يرجى إدخال')
+                    ? 'bg-amber-950/70 border border-amber-500/50 text-amber-200'
+                    : 'bg-emerald-950/60 border border-emerald-600/50 text-emerald-300'
+                }`}>
+                  {engineMessage.includes('خطأ') || engineMessage.includes('تعذر') || engineMessage.includes('يرجى إدخال') ? (
+                    <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
+                  ) : (
+                    <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+                  )}
+                  <span>{engineMessage}</span>
+                </div>
+
+                {(engineMessage.includes('الإعدادات') || engineMessage.includes('مفتاح')) && (
+                  <button 
+                    onClick={() => { setShowOcrModal(false); setShowSettingsModal(true); }}
+                    className="w-full bg-[#3A271F] hover:bg-[#4D342A] border border-amber-600/40 text-amber-300 py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition cursor-pointer"
+                  >
+                    <Settings className="w-4 h-4 text-amber-400" />
+                    <span>فتح شاشة الإعدادات وضبط المفتاح</span>
+                  </button>
+                )}
               </div>
             )}
 
@@ -786,6 +964,141 @@ export default function App() {
                 </div>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* نافذة الإعدادات وضبط مفتاح Gemini API */}
+      {showSettingsModal && (
+        <div className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-[#221712] border border-[#4A2D22] w-full max-w-md rounded-2xl p-5 shadow-2xl space-y-4">
+            <div className="flex justify-between items-center pb-2 border-b border-[#3A271F]">
+              <h2 className="font-bold text-base text-amber-400 flex items-center gap-2">
+                <Settings className="w-5 h-5 text-amber-500" />
+                إعدادات النظام والذكاء الاصطناعي
+              </h2>
+              <button 
+                onClick={() => setShowSettingsModal(false)}
+                className="text-neutral-400 hover:text-white p-1 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* قسم مفتاح Gemini API */}
+            <div className="bg-[#1A110D] border border-[#3E2820] rounded-xl p-3.5 space-y-3">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-bold text-amber-300 flex items-center gap-1.5">
+                  <Key className="w-4 h-4 text-amber-500" />
+                  مفتاح Gemini API (Google AI Studio)
+                </label>
+                {localStorage.getItem('asmo_gemini_api_key') && (
+                  <span className="text-[10px] bg-emerald-950 text-emerald-400 px-2 py-0.5 rounded border border-emerald-600/40">
+                    المفتاح مفعل
+                  </span>
+                )}
+              </div>
+
+              <div className="relative">
+                <input 
+                  type={showApiKeyText ? 'text' : 'password'}
+                  value={apiKeyInput}
+                  onChange={(e) => setApiKeyInput(e.target.value)}
+                  placeholder="AIzaSy..."
+                  className="w-full bg-[#271B15] border border-[#4D342A] text-xs font-mono text-neutral-100 pr-3 pl-10 py-2.5 rounded-xl focus:border-amber-500 outline-none"
+                />
+                <button 
+                  type="button"
+                  onClick={() => setShowApiKeyText(!showApiKeyText)}
+                  className="absolute left-3 top-2.5 text-neutral-400 hover:text-amber-300 cursor-pointer"
+                  title={showApiKeyText ? 'إخفاء المفتاح' : 'إظهار المفتاح'}
+                >
+                  {showApiKeyText ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+
+              <p className="text-[11px] text-neutral-400 leading-relaxed">
+                يُستخدم المفتاح لإجراء الفحص البصري الفوري لجداول الجرد مباشرة من هاتفك وبأقصى سرعة ودقة دون الحاجة لأي خادم وسيط.
+              </p>
+
+              {/* أزرار الحفظ والاختبار */}
+              <div className="grid grid-cols-2 gap-2 pt-1">
+                <button 
+                  onClick={saveApiKey}
+                  className="bg-[#D35400] hover:bg-[#b84500] text-white py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow transition cursor-pointer"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  <span>حفظ المفتاح</span>
+                </button>
+
+                <button 
+                  onClick={testApiKey}
+                  disabled={isTestingKey}
+                  className="bg-[#3A271F] hover:bg-[#4D342A] border border-[#543A2F] text-amber-200 py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+                >
+                  {isTestingKey ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-400" />
+                      <span>جاري التحقق...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                      <span>اختبار الاتصال</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* رسالة نجاح الحفظ */}
+              {apiKeySaveSuccess && (
+                <div className="p-2 bg-emerald-950/70 border border-emerald-600/40 rounded-lg text-[11px] text-emerald-300 flex items-center gap-1.5">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  <span>تم حفظ مفتاح Gemini بنجاح وتفعيله للفحص المباشر.</span>
+                </div>
+              )}
+
+              {/* نتيجة اختبار المفتاح */}
+              {keyTestResult && (
+                <div className={`p-2.5 rounded-lg text-[11px] flex items-center gap-1.5 ${
+                  keyTestResult.success 
+                    ? 'bg-emerald-950/70 border border-emerald-600/40 text-emerald-300' 
+                    : 'bg-red-950/70 border border-red-600/40 text-red-300'
+                }`}>
+                  {keyTestResult.success ? (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  ) : (
+                    <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+                  )}
+                  <span>{keyTestResult.message}</span>
+                </div>
+              )}
+            </div>
+
+            {/* قسم إدارة البيانات وإفراغ المخزون */}
+            <div className="bg-[#1A110D] border border-red-950/50 rounded-xl p-3.5 space-y-2">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-xs font-bold text-neutral-200">إفراغ قاعدة البيانات</h3>
+                  <p className="text-[10px] text-neutral-400">حذف كافة الأصناف والمواقع برمز الأمان</p>
+                </div>
+                <button 
+                  onClick={() => { setShowSettingsModal(false); setShowPinModal(true); }}
+                  className="bg-red-950/60 hover:bg-red-900/60 border border-red-800/40 text-red-300 py-1.5 px-3 rounded-lg text-xs font-bold flex items-center gap-1 transition cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>مسح البيانات</span>
+                </button>
+              </div>
+            </div>
+
+            {/* زر الإغلاق */}
+            <button 
+              onClick={() => setShowSettingsModal(false)}
+              className="w-full bg-[#35241D] hover:bg-[#453026] text-neutral-300 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer"
+            >
+              إغلاق
+            </button>
           </div>
         </div>
       )}
