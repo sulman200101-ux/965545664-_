@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { jsPDF } from 'jspdf';
 import { GoogleGenAI } from '@google/genai';
 import { categorizeAndTranslate } from './utils/translator';
+import { ExportService } from './services/exportService';
 import { 
   Camera as CameraIcon, 
   Image as ImageIcon, 
@@ -413,86 +414,41 @@ export default function App() {
     setNewLocationCode('');
   };
 
-  // 4. دالة إنشاء ملف PDF حقيقي وإرساله عبر واتساب
+  const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
+
+  // 4. دالة إنشاء ومشاركة ملف PDF العربي عبر واتساب
   const sendWhatsAppReport = async () => {
+    if (items.length === 0) {
+      alert('لا توجد أصناف مسجلة في قاعدة البيانات لتوليد التقرير.');
+      return;
+    }
     try {
-      const doc = new jsPDF({
-        orientation: 'p',
-        unit: 'mm',
-        format: 'a4',
-      });
+      setIsGeneratingPdf(true);
+      await ExportService.sendViaWhatsApp(items);
+    } catch (err: any) {
+      console.warn('WhatsApp PDF share error:', err);
+      alert('حدث خطأ أثناء إعداد ملف الـ PDF. جاري التنزيل المباشر...');
+      try {
+        await ExportService.downloadPdf(items);
+      } catch {}
+    } finally {
+      setIsGeneratingPdf(false);
+    }
+  };
 
-      // إضافة ترويسة التقرير
-      doc.setFontSize(16);
-      doc.text("ASMO Spare Parts Inventory Report", 105, 20, { align: 'center' });
-      doc.setFontSize(10);
-      doc.text(`Date: ${new Date().toISOString().slice(0, 10)}`, 20, 30);
-      doc.text(`Total Items: ${totalQty}  |  Locations: ${uniqueLocations.length}`, 20, 36);
-
-      // رسم خط فاصل
-      doc.setLineWidth(0.5);
-      doc.line(20, 40, 190, 40);
-
-      // كتابة بيانات القطع
-      let yPosition = 50;
-      doc.setFontSize(9);
-
-      items.forEach((item, index) => {
-        if (yPosition > 270) {
-          doc.addPage();
-          yPosition = 20;
-        }
-
-        doc.text(`${index + 1}. Part: ${item.partNumber}`, 20, yPosition);
-        doc.text(`Loc: ${item.location}  |  Qty: ${item.quantity}  |  Status: ${item.status}`, 80, yPosition);
-        yPosition += 5;
-        
-        // الوصف
-        const desc = doc.splitTextToSize(`Desc: ${item.description}`, 160);
-        doc.text(desc, 20, yPosition);
-        yPosition += desc.length * 5 + 3;
-
-        doc.setDrawColor(200, 200, 200);
-        doc.line(20, yPosition - 1, 190, yPosition - 1);
-        yPosition += 4;
-      });
-
-      // تحويل الـ PDF إلى ملف Blob
-      const pdfBlob = doc.output('blob');
-      const pdfFile = new File([pdfBlob], `تقرير-الجرد-${new Date().toISOString().slice(0, 10)}.pdf`, {
-        type: 'application/pdf',
-      });
-
-      // المشاركة المباشرة لملف الـ PDF مع واتساب عبر نظام الجوال
-      if (navigator.canShare && navigator.canShare({ files: [pdfFile] })) {
-        try {
-          await navigator.share({
-            files: [pdfFile],
-            title: 'تقرير الجرد - أسمو',
-            text: 'مرفق تقرير جرد قطع الغيار بصيغة PDF',
-          });
-        } catch (shareErr: any) {
-          // إذا ألغى المستخدم نافذة المشاركة، يتم التنزيل التلقائي كخيار بديل
-          if (
-            shareErr?.name === 'AbortError' ||
-            String(shareErr?.message).toLowerCase().includes('cancel')
-          ) {
-            return;
-          }
-          doc.save(`تقرير-الجرد-${new Date().toISOString().slice(0, 10)}.pdf`);
-        }
-      } else {
-        // في حال عدم دعم المشاركة المباشرة، يتم تنزيله تلقائياً
-        doc.save(`تقرير-الجرد-${new Date().toISOString().slice(0, 10)}.pdf`);
-      }
-    } catch (error: any) {
-      if (
-        error?.name === 'AbortError' ||
-        String(error?.message).toLowerCase().includes('cancel')
-      ) {
-        return;
-      }
-      console.warn('ملاحظة توليد الـ PDF:', error);
+  // 5. دالة تنزيل ملف الـ PDF مباشرة للجهاز
+  const downloadPdfReport = async () => {
+    if (items.length === 0) {
+      alert('لا توجد أصناف مسجلة لتوليد التقرير.');
+      return;
+    }
+    try {
+      setIsGeneratingPdf(true);
+      await ExportService.downloadPdf(items);
+    } catch (err: any) {
+      console.warn('PDF download error:', err);
+    } finally {
+      setIsGeneratingPdf(false);
     }
   };
 
@@ -562,14 +518,33 @@ export default function App() {
         </div>
       )}
 
-      {/* زر تقرير الواتساب */}
-      <div className="mb-3">
+      {/* أزرار تقرير الـ PDF والواتساب */}
+      <div className="mb-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
         <button 
           onClick={sendWhatsAppReport}
-          className="w-full bg-[#25D366] hover:bg-[#20bd5a] text-slate-900 py-2.5 px-4 rounded-xl font-bold flex items-center justify-center gap-2 text-sm shadow-md transition cursor-pointer"
+          disabled={isGeneratingPdf}
+          className="w-full bg-[#25D366] hover:bg-[#20bd5a] disabled:opacity-60 text-slate-900 py-2.5 px-3 rounded-xl font-bold flex items-center justify-center gap-2 text-xs shadow-md transition cursor-pointer"
         >
-          <Share2 className="w-4 h-4 text-slate-900" />
-          <span>رفع تقرير PDF / مشاركة عبر الواتساب</span>
+          {isGeneratingPdf ? (
+            <>
+              <RefreshCw className="w-4 h-4 animate-spin text-slate-900" />
+              <span>جاري إعداد الـ PDF...</span>
+            </>
+          ) : (
+            <>
+              <Share2 className="w-4 h-4 text-slate-900" />
+              <span>إرسال PDF عبر الواتساب 🟢</span>
+            </>
+          )}
+        </button>
+
+        <button 
+          onClick={downloadPdfReport}
+          disabled={isGeneratingPdf}
+          className="w-full bg-[#3A271F] hover:bg-[#4D342A] border border-[#543A2F] disabled:opacity-60 text-amber-200 py-2.5 px-3 rounded-xl font-bold flex items-center justify-center gap-2 text-xs shadow transition cursor-pointer"
+        >
+          <Share2 className="w-4 h-4 text-amber-400 rotate-180" />
+          <span>تنزيل ملف PDF المنسق 📥</span>
         </button>
       </div>
 

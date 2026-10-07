@@ -1,25 +1,24 @@
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
-import { InventoryItem, LocationSummary } from '../types';
+import { Filesystem, Directory } from '@capacitor/filesystem';
+import { Share } from '@capacitor/share';
 
 /**
- * وحدة تصدير التقارير المتوافقة 100% مع اللغة العربية والـ RTL
- * تضمن معالجة النصوص العربية وحروفها المتصلة والخطوط دون أي رموز مكسورة (þÞþàþþ...)
+ * وحدة تصدير التقارير المتوافقة 100% مع اللغة العربية و Capacitor للأندرويد
  */
 
 export interface ExportReportOptions {
   title?: string;
   locationFilter?: string | null;
   categoryFilter?: string | null;
-  items: InventoryItem[];
-  locationsSummary?: LocationSummary[];
+  items: any[];
 }
 
 export class ExportService {
   /**
    * إنشاء وتوليد مستند الـ PDF باللغة العربية الصرفة وخطوط Cairo و Tajawal
    */
-  static async generateArabicPdf(options: ExportReportOptions): Promise<{ doc: jsPDF; file: File; filename: string }> {
+  static async generateArabicPdf(options: ExportReportOptions): Promise<{ doc: jsPDF; file: File; filename: string; blob: Blob }> {
     const { title = 'تقرير جرد قطع الغيار - أسمو (ASMO)', locationFilter, items } = options;
 
     const now = new Date();
@@ -33,9 +32,9 @@ export class ExportService {
       minute: '2-digit',
     });
 
-    const totalQty = items.reduce((sum, i) => sum + (i.qty_total || 0), 0);
-    const remQty = items.reduce((sum, i) => sum + (i.qty_remaining || 0), 0);
-    const outQty = items.reduce((sum, i) => sum + (i.qty_out || 0), 0);
+    const totalQty = items.reduce((sum, i) => sum + (Number(i.quantity ?? i.qty_total ?? 0)), 0);
+    const outQty = items.reduce((sum, i) => sum + (Number(i.outQty ?? i.qty_out ?? 0)), 0);
+    const remQty = totalQty - outQty;
 
     // إنشاء حاوية HTML مؤقتة بتنسيق A4 دقيق وخط عربي أصيل
     const reportContainer = document.createElement('div');
@@ -98,13 +97,11 @@ export class ExportService {
         <table style="width: 100%; border-collapse: collapse; font-size: 11px; margin-bottom: 20px; direction: rtl;">
           <thead>
             <tr style="background: #2C1E18; color: #F59E0B; text-align: center;">
-              <th style="padding: 10px 8px; border: 1px solid #432D24; width: 40px;">#</th>
+              <th style="padding: 10px 8px; border: 1px solid #432D24; width: 35px;">#</th>
               <th style="padding: 10px 8px; border: 1px solid #432D24; width: 110px;">رقم القطعة</th>
               <th style="padding: 10px 8px; border: 1px solid #432D24; width: 85px;">الموقع</th>
-              <th style="padding: 10px 8px; border: 1px solid #432D24; text-align: right;">الوصف والبيان (عربي / إنجليزي)</th>
-              <th style="padding: 10px 8px; border: 1px solid #432D24; width: 60px;">المخزون</th>
-              <th style="padding: 10px 8px; border: 1px solid #432D24; width: 55px;">الخارج</th>
-              <th style="padding: 10px 8px; border: 1px solid #432D24; width: 60px;">المتبقي</th>
+              <th style="padding: 10px 8px; border: 1px solid #432D24; text-align: right;">الوصف والتصنيف</th>
+              <th style="padding: 10px 8px; border: 1px solid #432D24; width: 60px;">الكمية</th>
               <th style="padding: 10px 8px; border: 1px solid #432D24; width: 75px;">الحالة</th>
             </tr>
           </thead>
@@ -113,22 +110,26 @@ export class ExportService {
               .map((item, idx) => {
                 const isEven = idx % 2 === 0;
                 const rowBg = isEven ? '#FFFFFF' : '#F9F6F0';
-                const statusColor = item.status === 'مدقق' ? '#059669' : item.status === 'غير مدقق' ? '#D97706' : '#2563EB';
+                const pNum = item.partNumber || item.part_number || '—';
+                const loc = item.location || item.location_code || '—';
+                const qty = item.quantity ?? item.qty_total ?? 1;
+                const desc = item.description || item.description_ar || item.description_en || '—';
+                const cat = item.category || 'عام';
+                const status = item.status || 'مضاف';
+                const statusColor = status === 'مدقق' ? '#059669' : status === 'غير مدقق' ? '#D97706' : '#2563EB';
                 return `
                 <tr style="background: ${rowBg}; text-align: center; border-bottom: 1px solid #E5E7EB;">
                   <td style="padding: 8px 6px; border: 1px solid #E5E7EB; font-weight: 700; color: #6B7280;">${idx + 1}</td>
-                  <td style="padding: 8px 6px; border: 1px solid #E5E7EB; font-weight: 800; color: #111827; font-family: monospace; direction: ltr;">${item.part_number}</td>
-                  <td style="padding: 8px 6px; border: 1px solid #E5E7EB; font-weight: 700; color: #92400E; background: #FEF3C7;">${item.location_code}</td>
+                  <td style="padding: 8px 6px; border: 1px solid #E5E7EB; font-weight: 800; color: #111827; font-family: monospace; direction: ltr;">${pNum}</td>
+                  <td style="padding: 8px 6px; border: 1px solid #E5E7EB; font-weight: 700; color: #92400E; background: #FEF3C7;">${loc}</td>
                   <td style="padding: 8px 8px; border: 1px solid #E5E7EB; text-align: right; line-height: 1.4;">
-                    <div style="font-weight: 700; color: #1F2937;">${item.description_ar || item.description_en || '—'}</div>
-                    ${item.description_en && item.description_ar ? `<div style="font-size: 9.5px; color: #6B7280; direction: ltr; text-align: right;">${item.description_en}</div>` : ''}
+                    <div style="font-weight: 700; color: #1F2937;">${desc}</div>
+                    <div style="font-size: 9.5px; color: #6B7280;">التصنيف: ${cat}</div>
                   </td>
-                  <td style="padding: 8px 6px; border: 1px solid #E5E7EB; font-weight: 700; color: #374151;">${item.qty_total}</td>
-                  <td style="padding: 8px 6px; border: 1px solid #E5E7EB; font-weight: 700; color: #DC2626;">${item.qty_out}</td>
-                  <td style="padding: 8px 6px; border: 1px solid #E5E7EB; font-weight: 800; color: #059669;">${item.qty_remaining}</td>
+                  <td style="padding: 8px 6px; border: 1px solid #E5E7EB; font-weight: 800; color: #059669;">${qty}</td>
                   <td style="padding: 8px 6px; border: 1px solid #E5E7EB;">
                     <span style="display: inline-block; padding: 2px 6px; border-radius: 6px; font-size: 9.5px; font-weight: 700; color: ${statusColor}; border: 1px solid ${statusColor}40; background: ${statusColor}15;">
-                      ${item.status || 'مضاف'}
+                      ${status}
                     </span>
                   </td>
                 </tr>
@@ -141,7 +142,7 @@ export class ExportService {
         <!-- Footer -->
         <div style="border-top: 2px solid #E5E7EB; padding-top: 12px; margin-top: 24px; display: flex; justify-content: space-between; align-items: center; font-size: 10px; color: #6B7280;">
           <div>تم استخراج التقرير بواسطة تطبيق قطع الغيار - أسمو (ASMO)</div>
-          <div>الصفحة 1 من 1</div>
+          <div>تاريخ الطباعة: ${dateFormatted}</div>
         </div>
       </div>
     `;
@@ -149,7 +150,7 @@ export class ExportService {
     document.body.appendChild(reportContainer);
 
     try {
-      // التقاط الحاوية كـ Canvas بدقة عالية 2x لضمان نقاء النصوص العربية والخطوط
+      // التقاط الحاوية كـ Canvas بدقة عالية لضمان نقاء النصوص العربية والخطوط
       const canvas = await html2canvas(reportContainer, {
         scale: 2,
         useCORS: true,
@@ -173,9 +174,8 @@ export class ExportService {
       const pdfBlob = pdf.output('blob');
       const file = new File([pdfBlob], filename, { type: 'application/pdf' });
 
-      return { doc: pdf, file, filename };
+      return { doc: pdf, file, filename, blob: pdfBlob };
     } finally {
-      // إزالة العنصر المؤقت
       if (reportContainer.parentNode) {
         reportContainer.parentNode.removeChild(reportContainer);
       }
@@ -183,25 +183,26 @@ export class ExportService {
   }
 
   /**
-   * تجهيز ملخص نصي للجرد
+   * تجهيز ملخص نصي للجرد لمشاركته عبر واتساب
    */
-  static generateTextSummary(items: InventoryItem[], locationCode?: string): string {
-    const totalQty = items.reduce((sum, i) => sum + (i.qty_total || 0), 0);
-    const remQty = items.reduce((sum, i) => sum + (i.qty_remaining || 0), 0);
-    const outQty = items.reduce((sum, i) => sum + (i.qty_out || 0), 0);
+  static generateTextSummary(items: any[], locationCode?: string): string {
+    const totalQty = items.reduce((sum, i) => sum + (Number(i.quantity ?? i.qty_total ?? 0)), 0);
 
     let text = `📦 *تقرير جرد قطع الغيار - أسمو (ASMO)*\n`;
     if (locationCode && locationCode !== 'ALL') {
       text += `📍 *الموقع:* ${locationCode}\n`;
     }
     text += `📊 *إجمالي الأصناف:* ${items.length} صنف\n`;
-    text += `📈 *إجمالي المخزون:* ${totalQty} قطعة\n`;
-    text += `📥 *المتبقي:* ${remQty} | 📤 *الخارج:* ${outQty}\n\n`;
+    text += `📈 *إجمالي المخزون:* ${totalQty} قطعة\n\n`;
 
     text += `*عينة من الأصناف المسجلة:*\n`;
     const sampleItems = items.slice(0, 10);
     sampleItems.forEach((item, idx) => {
-      text += `${idx + 1}. \`${item.part_number}\` (${item.location_code}) - ${item.description_ar || item.description_en} [متبقي: ${item.qty_remaining}]\n`;
+      const pNum = item.partNumber || item.part_number || '—';
+      const loc = item.location || item.location_code || '—';
+      const desc = item.description || item.description_ar || item.description_en || '—';
+      const qty = item.quantity ?? item.qty_total ?? 1;
+      text += `${idx + 1}. \`${pNum}\` (${loc}) - ${desc} [كمية: ${qty}]\n`;
     });
 
     if (items.length > 10) {
@@ -213,14 +214,14 @@ export class ExportService {
   }
 
   /**
-   * إرسال التقرير عبر واتساب (WhatsApp) مع إرفاق الـ PDF أوتوماتيكياً
+   * مشاركة وإرسال التقرير عبر واتساب مع دعم Capacitor Native والـ Web
    */
-  static async sendViaWhatsApp(items: InventoryItem[], locationCode?: string): Promise<void> {
+  static async sendViaWhatsApp(items: any[], locationCode?: string): Promise<void> {
     const title = locationCode && locationCode !== 'ALL'
       ? `تقرير جرد أسمو للموقع ${locationCode}`
       : 'تقرير جرد قطع الغيار الشامل - أسمو';
 
-    const { file, doc, filename } = await this.generateArabicPdf({
+    const { file, doc, filename, blob } = await this.generateArabicPdf({
       title,
       locationFilter: locationCode && locationCode !== 'ALL' ? locationCode : null,
       items,
@@ -228,8 +229,44 @@ export class ExportService {
 
     const summaryText = this.generateTextSummary(items, locationCode);
 
-    // إذا كان المتصفح/الهاتف يدعم إرفاق ومشاركة ملف الـ PDF مباشرة إلى تطبيق WhatsApp
-    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    // 1. إذا كان التطبيق يعمل داخل بيئة أندرويد الأصلية (Capacitor)
+    try {
+      const isNative = typeof window !== 'undefined' && Boolean((window as any).Capacitor?.isNativePlatform?.());
+      if (isNative) {
+        // تحويل الـ Blob إلى Base64
+        const reader = new FileReader();
+        const base64Promise = new Promise<string>((resolve) => {
+          reader.onloadend = () => {
+            const res = reader.result as string;
+            resolve(res.includes(',') ? res.split(',')[1] : res);
+          };
+          reader.readAsDataURL(blob);
+        });
+
+        const base64Data = await base64Promise;
+        const savedFile = await Filesystem.writeFile({
+          path: filename,
+          data: base64Data,
+          directory: Directory.Cache,
+        });
+
+        await Share.share({
+          title: 'تقرير الجرد - أسمو',
+          text: summaryText,
+          url: savedFile.uri,
+          dialogTitle: 'مشاركة تقرير الجرد عبر واتساب',
+        });
+        return;
+      }
+    } catch (nativeErr: any) {
+      if (nativeErr?.message?.includes('canceled') || nativeErr?.message?.includes('dismissed')) {
+        return;
+      }
+      console.warn('Capacitor native share fallback:', nativeErr);
+    }
+
+    // 2. إذا كان المتصفح يدعم مشاركة الملفات مباشرة (Web Share API)
+    if (typeof navigator !== 'undefined' && navigator.canShare && navigator.canShare({ files: [file] })) {
       try {
         await navigator.share({
           title,
@@ -237,49 +274,54 @@ export class ExportService {
           files: [file],
         });
         return;
-      } catch (err) {
-        if ((err as Error)?.name === 'AbortError') return;
+      } catch (err: any) {
+        if (err?.name === 'AbortError') return;
       }
     }
 
-    // بديل فوري للمتصفحات التي لا تدعم navigator.share
+    // 3. خيار التنزيل التلقائي وفتح تطبيق واتساب
+    doc.save(filename);
     const encodedText = encodeURIComponent(summaryText);
     window.open(`https://wa.me/?text=${encodedText}`, '_blank');
-    doc.save(filename);
   }
 
   /**
-   * إرسال التقرير عبر البريد الإلكتروني (Email) مع إرفاق الـ PDF أوتوماتيكياً
+   * تنزيل ملف الـ PDF مباشرة للجهاز
    */
-  static async sendViaEmail(items: InventoryItem[], locationCode?: string): Promise<void> {
+  static async downloadPdf(items: any[], locationCode?: string): Promise<void> {
     const title = locationCode && locationCode !== 'ALL'
-      ? `تقرير جرد قطع الغيار - الموقع ${locationCode}`
-      : 'تقرير جرد قطع الغيار الشامل - أسمو (ASMO)';
+      ? `تقرير جرد أسمو للموقع ${locationCode}`
+      : 'تقرير جرد قطع الغيار الشامل - أسمو';
 
-    const { file, doc, filename } = await this.generateArabicPdf({
+    const { doc, filename, blob } = await this.generateArabicPdf({
       title,
       locationFilter: locationCode && locationCode !== 'ALL' ? locationCode : null,
       items,
     });
 
-    const summaryText = this.generateTextSummary(items, locationCode);
-
-    if (navigator.canShare && navigator.canShare({ files: [file] })) {
-      try {
-        await navigator.share({
-          title,
-          text: summaryText,
-          files: [file],
+    try {
+      const isNative = typeof window !== 'undefined' && Boolean((window as any).Capacitor?.isNativePlatform?.());
+      if (isNative) {
+        const reader = new FileReader();
+        const base64Promise = new Promise<string>((resolve) => {
+          reader.onloadend = () => {
+            const res = reader.result as string;
+            resolve(res.includes(',') ? res.split(',')[1] : res);
+          };
+          reader.readAsDataURL(blob);
+        });
+        const base64Data = await base64Promise;
+        await Filesystem.writeFile({
+          path: filename,
+          data: base64Data,
+          directory: Directory.Documents,
         });
         return;
-      } catch (err) {
-        if ((err as Error)?.name === 'AbortError') return;
       }
+    } catch (e) {
+      console.warn('Native download fallback:', e);
     }
 
-    const subject = encodeURIComponent(title);
-    const body = encodeURIComponent(summaryText);
-    window.location.href = `mailto:?subject=${subject}&body=${body}`;
     doc.save(filename);
   }
 }
